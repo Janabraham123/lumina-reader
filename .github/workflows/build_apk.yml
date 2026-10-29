@@ -29,14 +29,14 @@ jobs:
       - name: Generate Android Platform Files
         run: |
           if [ ! -d "android" ]; then
-            flutter create . --platforms=android --org=com.luminareader
+            flutter create . --platforms=android --org=com.luminareader --project-name play_reader
           fi
 
       - name: Get Dependencies
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
