@@ -7,6 +7,7 @@ import '../models/bookmark_model.dart';
 class StorageService {
   static const String _booksKey = 'lumina_books_cache';
   static const String _bookmarksKey = 'lumina_bookmarks_cache';
+  static const String _initializedKey = 'lumina_has_initialized_v2';
 
   static final StorageService instance = StorageService._internal();
   StorageService._internal();
@@ -14,18 +15,26 @@ class StorageService {
   /// Mengambil semua koleksi buku yang tersimpan.
   Future<List<BookModel>> getBooks() async {
     final prefs = await SharedPreferences.getInstance();
+    final hasInit = prefs.getBool(_initializedKey) ?? false;
     final jsonString = prefs.getString(_booksKey);
-    if (jsonString == null || jsonString.isEmpty) {
+
+    // Inisialisasi awal hanya sekali saat aplikasi pertama kali diinstall
+    if (!hasInit) {
+      await prefs.setBool(_initializedKey, true);
       final samples = _getInitialSampleBooks();
       await saveBooks(samples);
       return samples;
+    }
+
+    if (jsonString == null || jsonString.isEmpty) {
+      return [];
     }
 
     try {
       final List<dynamic> decoded = json.decode(jsonString);
       return decoded.map((e) => BookModel.fromMap(e)).toList();
     } catch (e) {
-      return _getInitialSampleBooks();
+      return [];
     }
   }
 
@@ -34,6 +43,13 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     final jsonString = json.encode(books.map((b) => b.toMap()).toList());
     await prefs.setString(_booksKey, jsonString);
+  }
+
+  /// Menghapus buku dari rak secara permanen.
+  Future<void> deleteBook(String bookId) async {
+    final books = await getBooks();
+    books.removeWhere((b) => b.id == bookId);
+    await saveBooks(books);
   }
 
   /// Memperbarui progres baca halaman terakhir suatu buku.

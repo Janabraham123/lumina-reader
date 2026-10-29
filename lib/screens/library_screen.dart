@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:pdfx/pdfx.dart';
 import '../models/book_model.dart';
 import '../services/storage_service.dart';
 import '../widgets/book_card.dart';
 import '../widgets/continue_reading_card.dart';
 import 'reader_screen.dart';
 
-/// Halaman utama rak buku (Library) dengan pelacakan progres membaca dan impor file.
+/// Halaman utama rak buku (Library) dengan pelacakan progres membaca, impor file, dan hapus buku.
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
 
@@ -44,12 +45,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
       if (result != null && result.files.single.path != null) {
         final file = result.files.single;
+        final filePath = file.path!;
+
+        // Hitung total halaman asli dari file PDF
+        int totalPages = 1;
+        try {
+          final doc = await PdfDocument.openFile(filePath);
+          totalPages = doc.pagesCount;
+          await doc.close();
+        } catch (e) {
+          debugPrint('Error counting pages: $e');
+        }
+
         final newBook = BookModel(
           id: 'pdf_${DateTime.now().millisecondsSinceEpoch}',
-          title: file.name.replaceAll('.pdf', ''),
+          title: file.name.replaceAll('.pdf', '').replaceAll('_', ' '),
           author: 'Dokumen Saya',
-          filePath: file.path!,
-          totalPages: 100, // Akan dihitung otomatis oleh PDF parser
+          filePath: filePath,
+          totalPages: totalPages > 0 ? totalPages : 1,
           lastReadPage: 1,
           lastReadAt: DateTime.now(),
           status: 'unread',
@@ -60,14 +73,47 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Buku "${newBook.title}" berhasil ditambahkan')),
+            SnackBar(
+              content: Text('Buku "${newBook.title}" ($totalPages halaman) berhasil ditambahkan'),
+            ),
           );
         }
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gagal memilih file PDF')),
+          SnackBar(content: Text('Gagal memilih file PDF: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteBook(BookModel book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hapus Buku?'),
+        content: Text('Apakah Anda yakin ingin menghapus "${book.title}" dari rak buku?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Hapus'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await StorageService.instance.deleteBook(book.id);
+      await _loadBooks();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Buku "${book.title}" telah dihapus')),
         );
       }
     }
@@ -192,14 +238,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   // Grid Rak Buku
                   if (_filteredBooks.isEmpty)
                     Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 40),
+                      padding: const EdgeInsets.symmetric(vertical: 60),
                       child: Center(
-                        child: Text(
-                          'Tidak ada buku yang ditemukan.',
-                          style: TextStyle(
-                            color: theme.colorScheme.onSurface.withOpacity(0.5),
-                            fontSize: 13,
-                          ),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.menu_book_outlined,
+                              size: 48,
+                              color: theme.colorScheme.onSurface.withOpacity(0.3),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Rak buku kosong.',
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurface.withOpacity(0.6),
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Ketuk tombol "Import PDF" di atas untuk menambahkan buku Anda.',
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurface.withOpacity(0.4),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     )
@@ -223,6 +288,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             await StorageService.instance.toggleFavorite(book.id);
                             _loadBooks();
                           },
+                          onDelete: () => _deleteBook(book),
                         );
                       },
                     ),

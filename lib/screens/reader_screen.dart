@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:pdfx/pdfx.dart';
 import '../models/book_model.dart';
 import '../models/bookmark_model.dart';
 import '../services/storage_service.dart';
@@ -8,8 +11,8 @@ import '../widgets/toc_sheet.dart';
 
 enum ReaderThemeMode { sepia, light, dark }
 
-/// Layar pembaca buku PDF dengan animasi 3D Page Curl realistis,
-/// scrubber progres, daftar isi, penanda halaman, dan tema warna baca.
+/// Layar pembaca buku PDF dengan render halaman asli dari file PDF,
+/// animasi 3D Page Curl realistis, zoom, daftar isi, penanda, dan tema warna baca.
 class ReaderScreen extends StatefulWidget {
   final BookModel book;
 
@@ -21,15 +24,123 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen> {
   late int _currentPage;
+  late int _totalPages;
   bool _isHudVisible = true;
-  ReaderThemeMode _themeMode = ReaderThemeMode.sepia;
+  ReaderThemeMode _themeMode = ReaderThemeMode.light;
   List<BookmarkModel> _bookmarks = [];
+
+  PdfDocument? _pdfDocument;
+  final Map<int, Uint8List> _renderedPageCache = {};
+  final Set<int> _renderingPages = {};
+  bool _isLoadingPdf = true;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
     _currentPage = widget.book.lastReadPage;
+    _totalPages = widget.book.totalPages > 0 ? widget.book.totalPages : 1;
     _loadBookmarks();
+    _openPdfDocument();
+  }
+
+  @override
+  void dispose() {
+    _pdfDocument?.close();
+    super.dispose();
+  }
+
+  Future<void> _openPdfDocument() async {
+    setState(() {
+      _isLoadingPdf = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final path = widget.book.filePath;
+
+      if (path.startsWith('assets/')) {
+        // Cek apakah file aset ada
+        try {
+          _pdfDocument = await PdfDocument.openAsset(path);
+        } catch (_) {
+          setState(() {
+            _errorMessage = 'Ini adalah buku contoh pratinjau.\nSilakan impor file PDF Anda sendiri dari memori HP untuk membaca dokumen lengkap.';
+            _isLoadingPdf = false;
+          });
+          return;
+        }
+      } else {
+        // File PDF asli dari penyimpanan HP
+        final file = File(path);
+        if (!await file.exists()) {
+          setState(() {
+            _errorMessage = 'File PDF tidak ditemukan di lokasi penyimpanan:\n$path';
+            _isLoadingPdf = false;
+          });
+          return;
+        }
+        _pdfDocument = await PdfDocument.openFile(path);
+      }
+
+      if (_pdfDocument != null) {
+        setState(() {
+          _totalPages = _pdfDocument!.pagesCount;
+          _isLoadingPdf = false;
+        });
+
+        // Update total halaman buku jika berbeda
+        if (widget.book.totalPages != _totalPages) {
+          widget.book.totalPages = _totalPages;
+          StorageService.instance.updateReadingProgress(widget.book.id, _currentPage);
+        }
+
+        // Render halaman saat ini dan halaman berikutnya untuk transisi mulus
+        _renderPage(_currentPage);
+        if (_currentPage < _totalPages) {
+          _renderPage(_currentPage + 1);
+        }
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Gagal memuat dokumen PDF: $e';
+        _isLoadingPdf = false;
+      });
+    }
+  }
+
+  Future<void> _renderPage(int pageNumber) async {
+    if (_pdfDocument == null ||
+        _renderedPageCache.containsKey(pageNumber) ||
+        _renderingPages.contains(pageNumber)) {
+      return;
+    }
+
+    if (pageNumber < 1 || pageNumber > _totalPages) return;
+
+    _renderingPages.add(pageNumber);
+
+    try {
+      final page = await _pdfDocument!.getPage(pageNumber);
+      // Skala 2.0x agar teks dan gambar di halaman PDF sangat tajam dan jelas
+      final pageImage = await page.render(
+        width: page.width * 2.0,
+        height: page.height * 2.0,
+        format: PdfPageImageFormat.jpeg,
+        backgroundColor: '#FFFFFF',
+      );
+      await page.close();
+
+      if (pageImage != null && mounted) {
+        setState(() {
+          _renderedPageCache[pageNumber] = pageImage.bytes;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error saat merender halaman $pageNumber: $e');
+    } finally {
+      _renderingPages.remove(pageNumber);
+    }
   }
 
   Future<void> _loadBookmarks() async {
@@ -38,23 +149,29 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _onPageChanged(int newPage) {
+    if (newPage < 1 || newPage > _totalPages) return;
+
     setState(() {
       _currentPage = newPage;
     });
-    // Simpan progres baca secara otomatis dan persisten
+
+    // Simpan progres baca ke database
     StorageService.instance.updateReadingProgress(widget.book.id, newPage);
+
+    // Render halaman sekitar secara cerdas (preloading)
+    _renderPage(newPage);
+    if (newPage < _totalPages) _renderPage(newPage + 1);
+    if (newPage > 1) _renderPage(newPage - 1);
   }
 
   void _toggleBookmark() async {
     final existingIndex = _bookmarks.indexWhere((bm) => bm.pageNumber == _currentPage);
     if (existingIndex != -1) {
-      // Hapus bookmark
       setState(() => _bookmarks.removeAt(existingIndex));
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Penanda halaman $_currentPage dihapus')),
       );
     } else {
-      // Tambah bookmark
       final newBm = BookmarkModel(
         id: 'bm_${DateTime.now().millisecondsSinceEpoch}',
         bookId: widget.book.id,
@@ -80,7 +197,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Colors.transparent,
       builder: (context) => TocSheet(
         bookTitle: widget.book.title,
-        totalPages: widget.book.totalPages,
+        totalPages: _totalPages,
         bookmarks: _bookmarks,
         onSelectPage: (page) {
           _onPageChanged(page);
@@ -100,22 +217,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
-  Color get _textColor {
-    switch (_themeMode) {
-      case ReaderThemeMode.sepia:
-        return const Color(0xFF382918);
-      case ReaderThemeMode.light:
-        return const Color(0xFF1E293B);
-      case ReaderThemeMode.dark:
-        return const Color(0xFFE4E4E7);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final isBookmarked = _bookmarks.any((bm) => bm.pageNumber == _currentPage);
-    final percent = widget.book.totalPages > 0
-        ? ((_currentPage / widget.book.totalPages) * 100).round()
+    final percent = _totalPages > 0
+        ? ((_currentPage / _totalPages) * 100).round()
         : 0;
 
     return Scaffold(
@@ -123,25 +229,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            // Konten Buku Utama dengan Animasi 3D Page Curl
+            // Konten Halaman PDF dengan Animasi 3D Page Curl
             Positioned.fill(
               child: GestureDetector(
                 onTap: () {
                   setState(() => _isHudVisible = !_isHudVisible);
                 },
-                child: PageCurlView(
-                  totalPages: widget.book.totalPages,
-                  initialPage: _currentPage,
-                  paperColor: _paperBackgroundColor,
-                  onPageChanged: _onPageChanged,
-                  pageBuilder: (context, pageIndex) {
-                    return _buildPageContent(pageIndex);
-                  },
-                ),
+                child: _buildBody(),
               ),
             ),
 
-            // Top HUD (Toolbar Atas)
+            // Top Toolbar (Header)
             AnimatedPositioned(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeInOut,
@@ -180,7 +278,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                           ),
                           Text(
-                            'Bab ${((_currentPage / 20).ceil())}: Halaman $_currentPage',
+                            'Halaman $_currentPage dari $_totalPages ($percent%)',
                             style: const TextStyle(fontSize: 11, color: Colors.grey),
                           ),
                         ],
@@ -205,7 +303,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               ),
             ),
 
-            // Bottom HUD (Scrubber Slider & Progres Baca)
+            // Bottom Scrubber Bar (Navigasi Halaman)
             AnimatedPositioned(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeInOut,
@@ -236,16 +334,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                         Expanded(
                           child: Slider(
-                            value: _currentPage.toDouble(),
+                            value: _currentPage.clamp(1, _totalPages).toDouble(),
                             min: 1.0,
-                            max: widget.book.totalPages.toDouble(),
+                            max: _totalPages > 1 ? _totalPages.toDouble() : 1.0,
                             onChanged: (val) {
                               _onPageChanged(val.round());
                             },
                           ),
                         ),
                         Text(
-                          '${widget.book.totalPages}',
+                          '$_totalPages',
                           style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                         ),
                       ],
@@ -254,11 +352,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'Halaman $_currentPage dari ${widget.book.totalPages} ($percent%)',
+                          'Halaman $_currentPage dari $_totalPages ($percent%)',
                           style: const TextStyle(fontSize: 12, color: Colors.grey),
                         ),
                         Text(
-                          'Sisa ${widget.book.totalPages - _currentPage} hal',
+                          'Sisa ${_totalPages - _currentPage} hal',
                           style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                         ),
                       ],
@@ -273,12 +371,134 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  Widget _buildBody() {
+    if (_isLoadingPdf) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text('Membuka dokumen PDF...'),
+          ],
+        ),
+      );
+    }
+
+    if (_errorMessage != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.info_outline, size: 48, color: Colors.blue),
+              const SizedBox(height: 16),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14, height: 1.5),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Kembali ke Rak Buku'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return PageCurlView(
+      totalPages: _totalPages,
+      initialPage: _currentPage,
+      paperColor: _paperBackgroundColor,
+      onPageChanged: _onPageChanged,
+      pageBuilder: (context, pageIndex) {
+        return _buildPdfPageContent(pageIndex);
+      },
+    );
+  }
+
+  Widget _buildPdfPageContent(int pageIndex) {
+    final imageBytes = _renderedPageCache[pageIndex];
+
+    if (imageBytes == null) {
+      _renderPage(pageIndex);
+      return Container(
+        color: _paperBackgroundColor,
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(height: 12),
+              Text(
+                'Memuat halaman $pageIndex...',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Render Gambar Asli Halaman PDF
+    Widget pdfImage = Image.memory(
+      imageBytes,
+      fit: BoxFit.contain,
+      filterQuality: FilterQuality.high,
+    );
+
+    // Filter Tema Warna
+    if (_themeMode == ReaderThemeMode.sepia) {
+      pdfImage = ColorFiltered(
+        colorFilter: const ColorFilter.mode(Color(0x228D6E63), BlendMode.multiply),
+        child: pdfImage,
+      );
+    } else if (_themeMode == ReaderThemeMode.dark) {
+      // Inversi warna untuk mode gelap (teks putih di latar hitam)
+      pdfImage = ColorFiltered(
+        colorFilter: const ColorFilter.matrix([
+          -1,  0,  0, 0, 255,
+           0, -1,  0, 0, 255,
+           0,  0, -1, 0, 255,
+           0,  0,  0, 1,   0,
+        ]),
+        child: pdfImage,
+      );
+    }
+
+    return Container(
+      color: _paperBackgroundColor,
+      child: Center(
+        child: InteractiveViewer(
+          minScale: 1.0,
+          maxScale: 3.5,
+          child: pdfImage,
+        ),
+      ),
+    );
+  }
+
   Widget _buildThemeMenu() {
     return PopupMenuButton<ReaderThemeMode>(
       icon: const Icon(Icons.palette_outlined),
       tooltip: 'Pilih Tema Kertas',
       onSelected: (mode) => setState(() => _themeMode = mode),
       itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: ReaderThemeMode.light,
+          child: Row(
+            children: [
+              CircleAvatar(radius: 8, backgroundColor: Colors.white),
+              SizedBox(width: 10),
+              Text('Terang (Asli PDF)'),
+            ],
+          ),
+        ),
         const PopupMenuItem(
           value: ReaderThemeMode.sepia,
           child: Row(
@@ -290,131 +510,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
           ),
         ),
         const PopupMenuItem(
-          value: ReaderThemeMode.light,
-          child: Row(
-            children: [
-              CircleAvatar(radius: 8, backgroundColor: Colors.white),
-              SizedBox(width: 10),
-              Text('Terang (Light)'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
           value: ReaderThemeMode.dark,
           child: Row(
             children: [
               CircleAvatar(radius: 8, backgroundColor: Color(0xFF18181B)),
               SizedBox(width: 10),
-              Text('Gelap (Dark)'),
+              Text('Gelap (Inversi Malam)'),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildPageContent(int pageIndex) {
-    return Container(
-      color: _paperBackgroundColor,
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header Halaman
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                widget.book.title,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _textColor.withOpacity(0.5),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              Text(
-                'Bab ${((pageIndex / 20).ceil())}',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _textColor.withOpacity(0.5),
-                ),
-              ),
-            ],
-          ),
-          const Divider(height: 20, thickness: 0.5),
-
-          // Teks Isi Halaman
-          Expanded(
-            child: SingleChildScrollView(
-              physics: const NeverScrollableScrollPhysics(),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Pembahasan Halaman $pageIndex',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: _textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Ketenangan batin tidak hadir dari mengendalikan dunia di sekitar kita, melainkan dari kemampuan kita mengendalikan persepsi dan respons kita terhadap kenyataan hidup.',
-                    textAlign: TextAlign.justify,
-                    style: TextStyle(
-                      fontSize: 15,
-                      height: 1.6,
-                      color: _textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: _textColor.withOpacity(0.05),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border(
-                        left: BorderSide(color: Colors.blue.shade600, width: 3),
-                      ),
-                    ),
-                    child: Text(
-                      '"Bukan hal di luar kendali kita yang merisaukan manusia, melainkan penilaian manusia itu sendiri."',
-                      style: TextStyle(
-                        fontStyle: FontStyle.italic,
-                        fontSize: 14,
-                        color: _textColor.withOpacity(0.9),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Setiap kali Anda membalik halaman dengan menggeser jari, posisi terakhir selalu dicatat secara otomatis. Anda dapat keluar kapan pun dan melanjutkan membaca persis di titik ini.',
-                    textAlign: TextAlign.justify,
-                    style: TextStyle(
-                      fontSize: 15,
-                      height: 1.6,
-                      color: _textColor,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Footer Nomor Halaman
-          Center(
-            child: Text(
-              '$pageIndex',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-                color: _textColor.withOpacity(0.6),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 import '../models/book_model.dart';
 
-/// Kartu tampilan buku di rak utama dengan cover, progres baca visual, dan info halaman.
+/// Kartu tampilan buku di rak utama dengan cover, progres baca visual, dan aksi hapus.
 class BookCard extends StatelessWidget {
   final BookModel book;
   final VoidCallback onTap;
   final VoidCallback onFavoriteToggle;
+  final VoidCallback onDelete;
 
   const BookCard({
     super.key,
     required this.book,
     required this.onTap,
     required this.onFavoriteToggle,
+    required this.onDelete,
   });
 
   @override
@@ -105,6 +107,27 @@ class BookCard extends StatelessWidget {
                     ),
                   ),
 
+                  // Tombol Hapus Buku di Sudut Kiri Atas
+                  Positioned(
+                    top: 4,
+                    left: 4,
+                    child: GestureDetector(
+                      onTap: onDelete,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: const BoxDecoration(
+                          color: Colors.black45,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.delete_outline,
+                          size: 16,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+
                   // Tombol Favorit di Sudut Kanan Atas
                   Positioned(
                     top: 4,
@@ -113,8 +136,8 @@ class BookCard extends StatelessWidget {
                       onTap: onFavoriteToggle,
                       child: Container(
                         padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: Colors.black26,
+                        decoration: const BoxDecoration(
+                          color: Colors.black45,
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
