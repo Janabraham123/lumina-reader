@@ -14,7 +14,7 @@ dependencies:
   path_provider: ^2.1.2
   shared_preferences: ^2.2.2
   audioplayers: ^6.0.0
-  pdfx: ^2.9.2
+  syncfusion_flutter_pdfviewer: ^26.2.14
 
 dev_dependencies:
   flutter_test:

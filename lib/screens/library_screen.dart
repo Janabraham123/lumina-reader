@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:pdfx/pdfx.dart';
 import '../models/book_model.dart';
 import '../services/storage_service.dart';
 import '../widgets/book_card.dart';
@@ -47,22 +46,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         final file = result.files.single;
         final filePath = file.path!;
 
-        // Hitung total halaman asli dari file PDF
-        int totalPages = 1;
-        try {
-          final doc = await PdfDocument.openFile(filePath);
-          totalPages = doc.pagesCount;
-          await doc.close();
-        } catch (e) {
-          debugPrint('Error counting pages: $e');
-        }
-
         final newBook = BookModel(
           id: 'pdf_${DateTime.now().millisecondsSinceEpoch}',
           title: file.name.replaceAll('.pdf', '').replaceAll('_', ' '),
           author: 'Dokumen Saya',
           filePath: filePath,
-          totalPages: totalPages > 0 ? totalPages : 1,
+          totalPages: 1, // Akan otomatis diperbarui oleh SfPdfViewer saat dibuka
           lastReadPage: 1,
           lastReadAt: DateTime.now(),
           status: 'unread',

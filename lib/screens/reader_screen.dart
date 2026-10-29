@@ -1,18 +1,17 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:pdfx/pdfx.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import '../models/book_model.dart';
 import '../models/bookmark_model.dart';
 import '../services/storage_service.dart';
 import '../services/audio_haptic_service.dart';
-import '../widgets/page_curl_view.dart';
 import '../widgets/toc_sheet.dart';
 
-enum ReaderThemeMode { sepia, light, dark }
+enum ReaderThemeMode { light, sepia, dark }
 
-/// Layar pembaca buku PDF dengan render halaman asli dari file PDF,
-/// animasi 3D Page Curl realistis, zoom, daftar isi, penanda, dan tema warna baca.
+/// Layar pembaca buku PDF dengan render dokumen asli melalui Syncfusion PDF Viewer.
+/// Mendukung pembalikan halaman horizontal, zoom pinch, audio gesekan kertas, haptic,
+/// daftar isi, penanda, dan tema warna baca.
 class ReaderScreen extends StatefulWidget {
   final BookModel book;
 
@@ -23,16 +22,13 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
+  late PdfViewerController _pdfViewerController;
   late int _currentPage;
   late int _totalPages;
   bool _isHudVisible = true;
   ReaderThemeMode _themeMode = ReaderThemeMode.light;
   List<BookmarkModel> _bookmarks = [];
-
-  PdfDocument? _pdfDocument;
-  final Map<int, Uint8List> _renderedPageCache = {};
-  final Set<int> _renderingPages = {};
-  bool _isLoadingPdf = true;
+  bool _isReady = false;
   String? _errorMessage;
 
   @override
@@ -40,107 +36,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
     super.initState();
     _currentPage = widget.book.lastReadPage;
     _totalPages = widget.book.totalPages > 0 ? widget.book.totalPages : 1;
+    _pdfViewerController = PdfViewerController();
     _loadBookmarks();
-    _openPdfDocument();
+    _validateFile();
+  }
+
+  void _validateFile() {
+    final path = widget.book.filePath;
+    if (!path.startsWith('assets/')) {
+      final file = File(path);
+      if (!file.existsSync()) {
+        setState(() {
+          _errorMessage = 'File PDF tidak ditemukan di memori HP:\n$path';
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
-    _pdfDocument?.close();
+    _pdfViewerController.dispose();
     super.dispose();
-  }
-
-  Future<void> _openPdfDocument() async {
-    setState(() {
-      _isLoadingPdf = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final path = widget.book.filePath;
-
-      if (path.startsWith('assets/')) {
-        // Cek apakah file aset ada
-        try {
-          _pdfDocument = await PdfDocument.openAsset(path);
-        } catch (_) {
-          setState(() {
-            _errorMessage = 'Ini adalah buku contoh pratinjau.\nSilakan impor file PDF Anda sendiri dari memori HP untuk membaca dokumen lengkap.';
-            _isLoadingPdf = false;
-          });
-          return;
-        }
-      } else {
-        // File PDF asli dari penyimpanan HP
-        final file = File(path);
-        if (!await file.exists()) {
-          setState(() {
-            _errorMessage = 'File PDF tidak ditemukan di lokasi penyimpanan:\n$path';
-            _isLoadingPdf = false;
-          });
-          return;
-        }
-        _pdfDocument = await PdfDocument.openFile(path);
-      }
-
-      if (_pdfDocument != null) {
-        setState(() {
-          _totalPages = _pdfDocument!.pagesCount;
-          _isLoadingPdf = false;
-        });
-
-        // Update total halaman buku jika berbeda
-        if (widget.book.totalPages != _totalPages) {
-          widget.book.totalPages = _totalPages;
-          StorageService.instance.updateReadingProgress(widget.book.id, _currentPage);
-        }
-
-        // Render halaman saat ini dan halaman berikutnya untuk transisi mulus
-        _renderPage(_currentPage);
-        if (_currentPage < _totalPages) {
-          _renderPage(_currentPage + 1);
-        }
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Gagal memuat dokumen PDF: $e';
-        _isLoadingPdf = false;
-      });
-    }
-  }
-
-  Future<void> _renderPage(int pageNumber) async {
-    if (_pdfDocument == null ||
-        _renderedPageCache.containsKey(pageNumber) ||
-        _renderingPages.contains(pageNumber)) {
-      return;
-    }
-
-    if (pageNumber < 1 || pageNumber > _totalPages) return;
-
-    _renderingPages.add(pageNumber);
-
-    try {
-      final page = await _pdfDocument!.getPage(pageNumber);
-      // Skala 2.0x agar teks dan gambar di halaman PDF sangat tajam dan jelas
-      final pageImage = await page.render(
-        width: page.width * 2.0,
-        height: page.height * 2.0,
-        format: PdfPageImageFormat.jpeg,
-        backgroundColor: '#FFFFFF',
-      );
-      await page.close();
-
-      if (pageImage != null && mounted) {
-        setState(() {
-          _renderedPageCache[pageNumber] = pageImage.bytes;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error saat merender halaman $pageNumber: $e');
-    } finally {
-      _renderingPages.remove(pageNumber);
-    }
   }
 
   Future<void> _loadBookmarks() async {
@@ -155,13 +71,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _currentPage = newPage;
     });
 
-    // Simpan progres baca ke database
+    // Simpan posisi baca secara otomatis
     StorageService.instance.updateReadingProgress(widget.book.id, newPage);
 
-    // Render halaman sekitar secara cerdas (preloading)
-    _renderPage(newPage);
-    if (newPage < _totalPages) _renderPage(newPage + 1);
-    if (newPage > 1) _renderPage(newPage - 1);
+    // Mainkan efek audio lembaran kertas & haptic
+    AudioHapticService.instance.playPageFlipSound();
+    AudioHapticService.instance.triggerHaptic();
   }
 
   void _toggleBookmark() async {
@@ -200,7 +115,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         totalPages: _totalPages,
         bookmarks: _bookmarks,
         onSelectPage: (page) {
-          _onPageChanged(page);
+          _pdfViewerController.jumpToPage(page);
         },
       ),
     );
@@ -211,7 +126,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       case ReaderThemeMode.sepia:
         return const Color(0xFFFBF0D9);
       case ReaderThemeMode.light:
-        return const Color(0xFFFFFFFF);
+        return const Color(0xFFF1F5F9);
       case ReaderThemeMode.dark:
         return const Color(0xFF18181B);
     }
@@ -229,17 +144,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            // Konten Halaman PDF dengan Animasi 3D Page Curl
+            // Konten Viewer Dokumen Asli PDF
             Positioned.fill(
               child: GestureDetector(
                 onTap: () {
                   setState(() => _isHudVisible = !_isHudVisible);
                 },
-                child: _buildBody(),
+                child: _buildPdfViewer(),
               ),
             ),
 
-            // Top Toolbar (Header)
+            // Top Header Bar
             AnimatedPositioned(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeInOut,
@@ -249,7 +164,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surface.withOpacity(0.95),
+                  color: Theme.of(context).colorScheme.surface.withOpacity(0.96),
                   border: Border(bottom: BorderSide(color: Colors.grey.withOpacity(0.2))),
                   boxShadow: [
                     BoxShadow(
@@ -313,7 +228,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               child: Container(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surface.withOpacity(0.95),
+                  color: Theme.of(context).colorScheme.surface.withOpacity(0.96),
                   border: Border(top: BorderSide(color: Colors.grey.withOpacity(0.2))),
                   boxShadow: [
                     BoxShadow(
@@ -338,7 +253,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             min: 1.0,
                             max: _totalPages > 1 ? _totalPages.toDouble() : 1.0,
                             onChanged: (val) {
-                              _onPageChanged(val.round());
+                              final target = val.round();
+                              _pdfViewerController.jumpToPage(target);
                             },
                           ),
                         ),
@@ -371,20 +287,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Widget _buildBody() {
-    if (_isLoadingPdf) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Membuka dokumen PDF...'),
-          ],
-        ),
-      );
-    }
-
+  Widget _buildPdfViewer() {
     if (_errorMessage != null) {
       return Center(
         child: Padding(
@@ -411,76 +314,94 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return PageCurlView(
-      totalPages: _totalPages,
-      initialPage: _currentPage,
-      paperColor: _paperBackgroundColor,
-      onPageChanged: _onPageChanged,
-      pageBuilder: (context, pageIndex) {
-        return _buildPdfPageContent(pageIndex);
-      },
-    );
-  }
+    final path = widget.book.filePath;
+    Widget viewer;
 
-  Widget _buildPdfPageContent(int pageIndex) {
-    final imageBytes = _renderedPageCache[pageIndex];
-
-    if (imageBytes == null) {
-      _renderPage(pageIndex);
-      return Container(
-        color: _paperBackgroundColor,
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const CircularProgressIndicator(),
-              const SizedBox(height: 12),
-              Text(
-                'Memuat halaman $pageIndex...',
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
+    if (path.startsWith('assets/')) {
+      viewer = SfPdfViewer.asset(
+        path,
+        controller: _pdfViewerController,
+        pageLayoutMode: PdfPageLayoutMode.single,
+        scrollDirection: PdfScrollDirection.horizontal,
+        pageSpacing: 4,
+        canShowScrollHead: false,
+        canShowScrollStatus: false,
+        enableDoubleTapZooming: true,
+        onDocumentLoaded: (PdfDocumentLoadedDetails details) {
+          setState(() {
+            _totalPages = details.document.pages.count;
+            _isReady = true;
+          });
+          if (widget.book.totalPages != _totalPages) {
+            widget.book.totalPages = _totalPages;
+            StorageService.instance.updateReadingProgress(widget.book.id, _currentPage);
+          }
+          if (_currentPage > 1) {
+            _pdfViewerController.jumpToPage(_currentPage);
+          }
+        },
+        onPageChanged: (PdfPageChangedDetails details) {
+          _onPageChanged(details.newPageNumber);
+        },
+        onDocumentLoadFailed: (PdfDocumentLoadFailedDetails details) {
+          setState(() {
+            _errorMessage = 'Buku contoh ini belum memiliki berkas PDF lokal.\nSilakan gunakan tombol "Import PDF" di rak buku untuk membuka dokumen asli Anda!';
+          });
+        },
+      );
+    } else {
+      viewer = SfPdfViewer.file(
+        File(path),
+        controller: _pdfViewerController,
+        pageLayoutMode: PdfPageLayoutMode.single,
+        scrollDirection: PdfScrollDirection.horizontal,
+        pageSpacing: 4,
+        canShowScrollHead: false,
+        canShowScrollStatus: false,
+        enableDoubleTapZooming: true,
+        onDocumentLoaded: (PdfDocumentLoadedDetails details) {
+          setState(() {
+            _totalPages = details.document.pages.count;
+            _isReady = true;
+          });
+          if (widget.book.totalPages != _totalPages) {
+            widget.book.totalPages = _totalPages;
+            StorageService.instance.updateReadingProgress(widget.book.id, _currentPage);
+          }
+          if (_currentPage > 1) {
+            _pdfViewerController.jumpToPage(_currentPage);
+          }
+        },
+        onPageChanged: (PdfPageChangedDetails details) {
+          _onPageChanged(details.newPageNumber);
+        },
+        onDocumentLoadFailed: (PdfDocumentLoadFailedDetails details) {
+          setState(() {
+            _errorMessage = 'Gagal memuat dokumen PDF:\n${details.description}';
+          });
+        },
       );
     }
 
-    // Render Gambar Asli Halaman PDF
-    Widget pdfImage = Image.memory(
-      imageBytes,
-      fit: BoxFit.contain,
-      filterQuality: FilterQuality.high,
-    );
-
     // Filter Tema Warna
     if (_themeMode == ReaderThemeMode.sepia) {
-      pdfImage = ColorFiltered(
-        colorFilter: const ColorFilter.mode(Color(0x228D6E63), BlendMode.multiply),
-        child: pdfImage,
+      viewer = ColorFiltered(
+        colorFilter: const ColorFilter.mode(Color(0x208D6E63), BlendMode.multiply),
+        child: viewer,
       );
     } else if (_themeMode == ReaderThemeMode.dark) {
-      // Inversi warna untuk mode gelap (teks putih di latar hitam)
-      pdfImage = ColorFiltered(
+      viewer = ColorFiltered(
         colorFilter: const ColorFilter.matrix([
           -1,  0,  0, 0, 255,
            0, -1,  0, 0, 255,
            0,  0, -1, 0, 255,
            0,  0,  0, 1,   0,
         ]),
-        child: pdfImage,
+        child: viewer,
       );
     }
 
-    return Container(
-      color: _paperBackgroundColor,
-      child: Center(
-        child: InteractiveViewer(
-          minScale: 1.0,
-          maxScale: 3.5,
-          child: pdfImage,
-        ),
-      ),
-    );
+    return viewer;
   }
 
   Widget _buildThemeMenu() {
